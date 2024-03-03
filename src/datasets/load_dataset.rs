@@ -7,11 +7,12 @@ use arrow::{
     datatypes::Schema,
 };
 use parquet::{
-    arrow::{ArrowReader, ArrowWriter, ParquetFileArrowReader},
+    arrow::{ArrowReader, ParquetFileArrowReader},
     file::reader::SerializedFileReader,
 };
 use std::sync::Arc;
 
+#[derive(Debug)]
 pub enum DatasetFileType {
     PARQUET,
     CSV,
@@ -25,9 +26,10 @@ pub struct Dataset {
     api: Api,
     train_file: String,
     test_file: String,
-    filetype: DatasetFileType
+    _filetype: DatasetFileType
 }
 
+#[derive(Debug)]
 pub struct DataTable{
     pub schema: Schema,
     pub data: Vec<RecordBatch>,
@@ -43,7 +45,7 @@ impl Dataset {
             api,
             train_file: train_file.to_string(),
             test_file: test_file.to_string(),
-            filetype: match filetype {
+            _filetype: match filetype {
                 "parquet" => DatasetFileType::PARQUET,
                 "csv" => DatasetFileType::CSV,
                 "json" => DatasetFileType::JSON,
@@ -70,13 +72,13 @@ impl Dataset {
         Ok(filenames)   
     }
 
-    pub fn load_parquet(&self, filename: &PathBuf) -> Result<DataTable, anyhow::Error> {
+    pub fn load_parquet(&self, filename: &PathBuf, batch_size: usize) -> Result<DataTable, anyhow::Error> {
         let file = File::open(filename)?;
         let file_reader = SerializedFileReader::new(file).unwrap();
         let mut arrow_reader = ParquetFileArrowReader::new(Arc::new(file_reader));
 
         let schema = arrow_reader.get_schema().unwrap();
-        let record_batch_reader = arrow_reader.get_record_reader(1).unwrap();
+        let record_batch_reader = arrow_reader.get_record_reader(batch_size).unwrap();
         let mut data: Vec<RecordBatch> = Vec::new();
 
         let mut rows = 0;

@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use candle_training::datasets::load_dataset::Dataset;
+    use arrow::array::StringArray;
 
     #[test]
     fn test_load_imdb_dataset() {
@@ -12,12 +13,13 @@ mod tests {
         let filename = dataset.download();
         let filenames = filename.unwrap();
 
-        let train_datatable = dataset.load_parquet(&filenames[0]);
-        assert_eq!(train_datatable.unwrap().rows, 25000);
+        let train_datatable = dataset.load_parquet(&filenames[0], 10).unwrap();
+        assert_eq!(train_datatable.rows, 25000);
 
-        let test_datatable = dataset.load_parquet(&filenames[1]);
-        assert_eq!(test_datatable.unwrap().rows, 25000);
+        let test_datatable = dataset.load_parquet(&filenames[1], 10).unwrap();
+        assert_eq!(test_datatable.rows, 25000);
 
+        std::println!("Train datatable: {:?}", train_datatable.data[0]);
 
     }
 
