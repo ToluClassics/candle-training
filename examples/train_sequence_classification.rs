@@ -5,7 +5,15 @@ use env_logger;
 use rand::rngs::ThreadRng;
 use rand::Rng;
 
+use candle_core::{DType, Device, IndexOp, Result, Shape, Tensor, D};
+use candle_nn::{
+    embedding, layer_norm, linear, linear_no_bias, loss, sequential, Activation, AdamW, Embedding,
+    LayerNorm, LayerNormConfig, Linear, Optimizer, ParamsAdamW, Sequential, VarBuilder, VarMap,
+};
+use candle_nn::{ops, Module};
+
 use candle_training::datasets::load_dataset::Dataset;
+use candle_training::models::load_model::{build_roberta_model_and_tokenizer, ModelType};
 
 /// cargo run --example train_sequence_classification --  --dataset-name imdb --hf-train-file plain_text/train-00000-of-00001.parquet --hf-test-file plain_text/test-00000-of-00001.parquet 
 // --max-length 128 --pad-to-max-length --model-name bert-base-uncased --train-batch-size 8 --eval-batch-size 8 --learning-rate 5e-5 
@@ -77,6 +85,7 @@ pub fn main(){
 
     let args = Args::parse();
     let seed: ThreadRng = rand::thread_rng();
+    let device = Device::Cpu;
 
     // Set up logging
     info!("Logging training parameters");
@@ -137,6 +146,15 @@ pub fn main(){
     info!("Sample Training example: {:?} and Label: {:?}", train_strings[0], train_labels[0]);
 
 
+    let var_map = VarMap::new();
+    let var_builder = VarBuilder::from_varmap(&var_map, DType::F32, &device);
+        
+    let (model_type, tokenizer, config) = build_roberta_model_and_tokenizer(args.model_name, false, "RobertaModel", &device).unwrap();
+    let model = match model_type {
+        ModelType::RobertaModel {model} => model,
+        _ => panic!("Model type not supported")
+    };
+    let classification_head =
 
 
 
