@@ -33,8 +33,8 @@ pub struct RobertaConfig {
     use_cache: bool,
     classifier_dropout: Option<f64>,
     model_type: Option<String>,
-    problem_type: Option<String>,
-    _num_labels: Option<usize>,
+    pub problem_type: Option<String>,
+    pub _num_labels: Option<usize>,
     id2label: Option<HashMap<String, String>>,
     label2id: Option<HashMap<String, usize>>
 }

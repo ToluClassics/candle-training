@@ -13,11 +13,20 @@ use candle_nn::{
 use candle_nn::{ops, Module};
 
 use candle_training::datasets::load_dataset::Dataset;
-use candle_training::models::load_model::{build_roberta_model_and_tokenizer, ModelType};
+use candle_training::models::load_model::{get_config_tokenizer_path, ModelType};
+use candle_training::models::roberta::{RobertaForSequenceClassification, RobertaConfig};
 
-/// cargo run --example train_sequence_classification --  --dataset-name imdb --hf-train-file plain_text/train-00000-of-00001.parquet --hf-test-file plain_text/test-00000-of-00001.parquet 
-// --max-length 128 --pad-to-max-length --model-name bert-base-uncased --train-batch-size 8 --eval-batch-size 8 --learning-rate 5e-5 
-// --weight-decay 0.0 --num-train-epochs 3 --gradient-accumulation-steps 1
+/*
+RUST_BACKTRACE=1 cargo run --example train_sequence_classification --  --dataset-name imdb --hf-train-file plain_text/train-00000-of-00001.parquet 
+--hf-test-file plain_text/test-00000-of-00001.parquet --max-length 128 --pad-to-max-length --model-name FacebookAI/roberta-base --train-batch-size 8 
+--eval-batch-size 8 --learning-rate 5e-5 --weight-decay 0.0 --num-train-epochs 3 --gradient-accumulation-steps 1
+
+ */
+
+pub const FLOATING_DTYPE: DType = DType::F32;
+pub const LONG_DTYPE: DType = DType::I64;
+const LEARNING_RATE: f64 = 0.05;
+const EPOCHS: usize = 10;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -85,7 +94,7 @@ pub fn main(){
 
     let args = Args::parse();
     let seed: ThreadRng = rand::thread_rng();
-    let device = Device::Cpu;
+    let device = Device::cuda_if_available(0).unwrap();
 
     // Set up logging
     info!("Logging training parameters");
@@ -145,17 +154,53 @@ pub fn main(){
     info!("Number of test examples: {}", test_strings.len());
     info!("Sample Training example: {:?} and Label: {:?}", train_strings[0], train_labels[0]);
 
+    
+    let (config_file, tokenizer, weights_filename) = get_config_tokenizer_path(&args.model_name, false).unwrap();
+    let mut config: RobertaConfig = serde_json::from_str(&config_file).unwrap();
+    config._num_labels = Some(1);
+    config.problem_type = Some("single_label_classification".to_string());
 
-    let var_map = VarMap::new();
-    let var_builder = VarBuilder::from_varmap(&var_map, DType::F32, &device);
+    let varmap = VarMap::new();
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+    
+    let model = RobertaForSequenceClassification::load(vs, &config).unwrap();
+    let paramsw = ParamsAdamW::default();
+    let mut adamw = AdamW::new(varmap.all_vars(), paramsw).unwrap();
+
+    for epoch in 1..EPOCHS + 1 {
+        info!("Epoch: {}", epoch);
+
+        for (_i, (input, label)) in train_strings.chunks(8).zip(train_labels.chunks(8)).enumerate(){
+
+            let pad_token_id = 0;
+            let max_len = 128;
+
+            let tokens = tokenizer.encode_batch(input.to_vec(), true).unwrap();
+            let token_ids = tokens
+            .iter()
+            .map(|tokens| {
+                let mut tokens = tokens.get_ids().to_vec();
+                tokens.resize(max_len, pad_token_id);
+                Ok(Tensor::new(tokens.as_slice(), &device)?)
+            })
+            .collect::<Result<Vec<_>>>().unwrap();
+
+            let token_ids = Tensor::stack(&token_ids, 0).unwrap();
+            let token_type_ids = token_ids.zeros_like().unwrap();
+            let labels = Tensor::new(label, &device).unwrap();
+
+            let outputs = model.forward(&token_ids, &token_type_ids, Some(&labels)).unwrap();
+            let loss = outputs.loss.unwrap();
+            let logits = outputs.logits;
+
+            info!("Logits: {:?}", logits.to_device(&Device::Cpu).unwrap().to_vec2::<f32>());
+            info!("Loss: {:?}", loss.to_device(&Device::Cpu).unwrap().to_vec1::<f64>());
+
+            adamw.backward_step(&loss).unwrap();
         
-    let (model_type, tokenizer, config) = build_roberta_model_and_tokenizer(args.model_name, false, "RobertaModel", &device).unwrap();
-    let model = match model_type {
-        ModelType::RobertaModel {model} => model,
-        _ => panic!("Model type not supported")
-    };
-    let classification_head =
+        }
 
+        break;
 
-
-}
+        }
+    }

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{anyhow, Error as E, Result};
 use candle_core::Device;
 use tokenizers::Tokenizer;
@@ -19,6 +21,44 @@ pub enum ModelType {
 pub fn round_to_decimal_places(n: f32, places: u32) -> f32 {
     let multiplier: f32 = 10f32.powi(places as i32);
     (n * multiplier).round() / multiplier
+}
+
+pub fn get_config_tokenizer_path(model_name_or_path: impl Into<String>, offline: bool)-> Result<(String, Tokenizer, PathBuf)>{
+    let (model_id, revision) = (model_name_or_path.into(), "main".to_string());
+    let repo = Repo::with_revision(model_id, RepoType::Model, revision);
+
+    let (config_filename, tokenizer_filename, weights_filename) = if offline {
+        let cache = Cache::default().repo(repo);
+        (
+            cache
+                .get("config.json")
+                .ok_or(anyhow!("Missing config file in cache"))?,
+            cache
+                .get("tokenizer.json")
+                .ok_or(anyhow!("Missing tokenizer file in cache"))?,
+            cache
+                .get("model.safetensors")
+                .ok_or(anyhow!("Missing weights file in cache"))?,
+        )
+    } else {
+        let api = Api::new()?;
+        let api = api.repo(repo);
+        (
+            api.get("config.json")?,
+            api.get("tokenizer.json")?,
+            api.get("model.safetensors")?,
+        )
+    };
+
+    println!("config_filename: {}", config_filename.display());
+    println!("tokenizer_filename: {}", tokenizer_filename.display());
+    println!("weights_filename: {}", weights_filename.display());
+
+
+    let config_file = std::fs::read_to_string(config_filename)?;
+    let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
+
+    Ok((config_file, tokenizer, weights_filename))
 }
 
 pub fn build_roberta_model_and_tokenizer(model_name_or_path: impl Into<String>, offline: bool, model_type: &str, device: &Device) -> Result<(ModelType, Tokenizer, RobertaConfig)> {
