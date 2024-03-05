@@ -73,11 +73,11 @@ impl Linear {
 
 pub struct Dropout {
     #[allow(dead_code)]
-    pr: f64,
+    pr: f32,
 }
 
 impl Dropout {
-    pub fn new(pr: f64) -> Self {
+    pub fn new(pr: f32) -> Self {
         Self { pr }
     }
 

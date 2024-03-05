@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{Embedding, Module, VarBuilder};
+use candle_nn::{Embedding, Module, VarBuilder, linear, layer_norm, LayerNorm, Linear, Dropout};
 
 use crate::models::modelling_outputs::{SequenceClassifierOutput, TokenClassifierOutput, QuestionAnsweringModelOutput};
-use crate::models::model_utils::{Dropout, HiddenAct, Linear, HiddenActLayer, LayerNorm, PositionEmbeddingType};
+use crate::models::model_utils::{HiddenAct, HiddenActLayer, PositionEmbeddingType};
 use crate::models::model_utils::binary_cross_entropy_with_logit;
 use serde::Deserialize;
 
@@ -19,7 +19,7 @@ pub struct RobertaConfig {
     num_attention_heads: usize,
     intermediate_size: usize,
     hidden_act: HiddenAct,
-    hidden_dropout_prob: f64,
+    hidden_dropout_prob: f32,
     max_position_embeddings: usize,
     type_vocab_size: usize,
     initializer_range: f64,
@@ -31,7 +31,7 @@ pub struct RobertaConfig {
     position_embedding_type: PositionEmbeddingType,
     #[serde(default)]
     use_cache: bool,
-    classifier_dropout: Option<f64>,
+    classifier_dropout: Option<f32>,
     model_type: Option<String>,
     pub problem_type: Option<String>,
     pub _num_labels: Option<usize>,
@@ -120,25 +120,25 @@ fn embedding(vocab_size: usize, hidden_size: usize, vb: VarBuilder) -> Result<Em
     Ok(Embedding::new(embeddings, hidden_size))
 }
 
-fn linear(size1: usize, size2: usize, vb: VarBuilder) -> Result<Linear> {
-    let weight = vb.get((size2, size1), "weight")?;
-    let bias = vb.get(size2, "bias")?;
-    Ok(Linear::new(weight, Some(bias)))
-}
+// fn linear(size1: usize, size2: usize, vb: VarBuilder) -> Result<Linear> {
+//     let weight = vb.get((size2, size1), "weight")?;
+//     let bias = vb.get(size2, "bias")?;
+//     Ok(Linear::new(weight, Some(bias)))
+// }
 
-fn layer_norm(size: usize, eps: f64, vb: VarBuilder) -> Result<LayerNorm> {
-    let (weight, bias) = match (vb.get(size, "weight"), vb.get(size, "bias")) {
-        (Ok(weight), Ok(bias)) => (weight, bias),
-        (Err(err), _) | (_, Err(err)) => {
-            if let (Ok(weight), Ok(bias)) = (vb.get(size, "gamma"), vb.get(size, "beta")) {
-                (weight, bias)
-            } else {
-                return Err(err);
-            }
-        }
-    };
-    Ok(LayerNorm::new(weight, bias, eps))
-}
+// fn layer_norm(size: usize, eps: f64, vb: VarBuilder) -> Result<LayerNorm> {
+//     let (weight, bias) = match (vb.get(size, "weight"), vb.get(size, "bias")) {
+//         (Ok(weight), Ok(bias)) => (weight, bias),
+//         (Err(err), _) | (_, Err(err)) => {
+//             if let (Ok(weight), Ok(bias)) = (vb.get(size, "gamma"), vb.get(size, "beta")) {
+//                 (weight, bias)
+//             } else {
+//                 return Err(err);
+//             }
+//         }
+//     };
+//     Ok(LayerNorm::new(weight, bias, eps))
+// }
 
 pub struct RobertaEmbeddings {
     word_embeddings: Embedding,
@@ -221,7 +221,7 @@ impl RobertaEmbeddings {
         }
 
         let embeddings = self.layer_norm.forward(&embeddings)?;
-        let embeddings = self.dropout.forward(&embeddings)?;
+        let embeddings = self.dropout.forward(&embeddings, true)?;
 
         Ok(embeddings)
     }
@@ -296,7 +296,7 @@ impl RobertaSelfAttention {
         let attention_scores = (attention_scores / (self.attention_head_size as f64).sqrt())?;
         let attention_probs =
             { candle_nn::ops::softmax(&attention_scores, candle_core::D::Minus1)? };
-        let attention_probs = self.dropout.forward(&attention_probs)?;
+        let attention_probs = self.dropout.forward(&attention_probs, true)?;
 
         let context_layer = attention_probs.matmul(&value_layer)?;
         let context_layer = context_layer.transpose(1, 2)?.contiguous()?;
@@ -329,7 +329,7 @@ impl RobertaSelfOutput {
 
     fn forward(&self, hidden_states: &Tensor, input_tensor: &Tensor) -> Result<Tensor> {
         let hidden_states = self.dense.forward(hidden_states)?;
-        let hidden_states = self.dropout.forward(&hidden_states)?;
+        let hidden_states = self.dropout.forward(&hidden_states, true)?;
         self.layer_norm.forward(&(hidden_states + input_tensor)?)
     }
 }
@@ -401,7 +401,7 @@ impl RobertaOutput {
 
     fn forward(&self, hidden_states: &Tensor, input_tensor: &Tensor) -> Result<Tensor> {
         let hidden_states = self.dense.forward(hidden_states)?;
-        let hidden_states = self.dropout.forward(&hidden_states)?;
+        let hidden_states = self.dropout.forward(&hidden_states, true)?;
         self.layer_norm.forward(&(hidden_states + input_tensor)?)
     }
 }
@@ -585,14 +585,19 @@ struct RobertaClassificationHead{
 impl RobertaClassificationHead {
 
     fn load(vb: VarBuilder, config: &RobertaConfig) -> Result<Self> {
-        let dense = linear(config.hidden_size, config.hidden_size, vb.pp("dense"))?;
+        // let dense = linear(config.hidden_size, config.hidden_size, vb.pp("dense"))?;
+        let dense = linear(config.hidden_size, config.hidden_size, vb)?;
         let classifier_dropout = config.classifier_dropout;
 
-        let classifier_dropout: f64 = match classifier_dropout {
+        let classifier_dropout: f32 = match classifier_dropout {
             Some(classifier_dropout) => classifier_dropout,
             None => config.hidden_dropout_prob, 
         };
-        let out_proj = linear(config.hidden_size, config._num_labels.unwrap(), vb.pp("out_proj"))?;
+        // let out_proj = linear(config.hidden_size, config._num_labels.unwrap(), vb.pp("out_proj"))?;
+
+        let out_proj = linear(config.hidden_size, config._num_labels.unwrap(), vb)?;
+
+        
 
         Ok( Self {
             dense,
@@ -605,10 +610,10 @@ impl RobertaClassificationHead {
     fn forward(&self, features: &Tensor) -> Result<Tensor> {
 
         let x = features.i((.., 0))?;
-        let x = self.dropout.forward(&x)?;
+        let x = self.dropout.forward(&x, true)?;
         let x = self.dense.forward(&x)?;
         let x = x.tanh()?;
-        let x = self.dropout.forward(&x)?;
+        let x = self.dropout.forward(&x, true)?;
         let x = self.out_proj.forward(&x)?;
 
         Ok(x)
@@ -741,7 +746,7 @@ impl RobertaForTokenClassification {
         let outputs = self
             .roberta
             .forward(input_ids, token_type_ids)?;
-        let outputs = self.dropout.forward(&outputs)?;
+        let outputs = self.dropout.forward(&outputs, true)?;
 
         let logits = self.classifier.forward(&outputs)?;
 
@@ -803,7 +808,7 @@ impl RobertaForQuestionAnswering {
         let outputs = self
             .roberta
             .forward(input_ids, token_type_ids)?;
-        let outputs = self.dropout.forward(&outputs)?;
+        let outputs = self.dropout.forward(&outputs, true)?;
 
         let logits = self.qa_outputs.forward(&outputs)?;
 

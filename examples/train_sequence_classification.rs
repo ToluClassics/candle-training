@@ -160,8 +160,11 @@ pub fn main(){
     config._num_labels = Some(1);
     config.problem_type = Some("single_label_classification".to_string());
 
-    let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+    let mut varmap = VarMap::new();
+    // let mut vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+
+    let vs = unsafe { VarBuilder::from_mmaped_safetensors(&[weights_filename.clone()], FLOATING_DTYPE, &device).unwrap() };
+    varmap.load(weights_filename).unwrap();
     
     let model = RobertaForSequenceClassification::load(vs, &config).unwrap();
     let paramsw = ParamsAdamW::default();
@@ -197,6 +200,8 @@ pub fn main(){
             info!("Loss: {:?}", loss.to_device(&Device::Cpu).unwrap().to_vec1::<f64>());
 
             adamw.backward_step(&loss).unwrap();
+
+            break;
         
         }
 
