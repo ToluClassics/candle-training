@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{num, path::PathBuf};
 
 use hf_hub::api::sync::Api;
 use std::fs::File;
@@ -78,6 +78,7 @@ impl Dataset {
         let mut arrow_reader = ParquetFileArrowReader::new(Arc::new(file_reader));
 
         let schema = arrow_reader.get_schema().unwrap();
+
         let record_batch_reader = arrow_reader.get_record_reader(batch_size).unwrap();
         let mut data: Vec<RecordBatch> = Vec::new();
 
@@ -93,7 +94,7 @@ impl Dataset {
         Ok(DataTable {
             schema,
             data,
-            rows
+            rows,
         })
     }
 }

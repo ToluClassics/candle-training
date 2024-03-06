@@ -24,7 +24,7 @@ pub fn round_to_decimal_places(n: f32, places: u32) -> f32 {
 }
 
 pub fn get_config_tokenizer_path(model_name_or_path: impl Into<String>, offline: bool)-> Result<(String, Tokenizer, PathBuf)>{
-    let (model_id, revision) = (model_name_or_path.into(), "main".to_string());
+    let (model_id, revision) = (model_name_or_path.into(), "refs/pr/2".to_string());
     let repo = Repo::with_revision(model_id, RepoType::Model, revision);
 
     let (config_filename, tokenizer_filename, weights_filename) = if offline {

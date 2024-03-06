@@ -4,8 +4,10 @@ use log::info;
 use env_logger;
 use rand::rngs::ThreadRng;
 use rand::Rng;
+use kdam::tqdm;
+use anyhow::Result;
 
-use candle_core::{DType, Device, IndexOp, Result, Shape, Tensor, D};
+use candle_core::{DType, Device, IndexOp, Shape, Tensor, D};
 use candle_nn::{
     embedding, layer_norm, linear, linear_no_bias, loss, sequential, Activation, AdamW, Embedding,
     LayerNorm, LayerNormConfig, Linear, Optimizer, ParamsAdamW, Sequential, VarBuilder, VarMap,
@@ -15,11 +17,10 @@ use candle_nn::{ops, Module};
 use candle_training::datasets::load_dataset::Dataset;
 use candle_training::models::load_model::{get_config_tokenizer_path, ModelType};
 use candle_training::models::roberta::{RobertaForSequenceClassification, RobertaConfig};
+use rand::seq::SliceRandom; // Import the SliceRandom trait
 
 /*
-RUST_BACKTRACE=1 cargo run --example train_sequence_classification --  --dataset-name imdb --hf-train-file plain_text/train-00000-of-00001.parquet 
---hf-test-file plain_text/test-00000-of-00001.parquet --max-length 128 --pad-to-max-length --model-name FacebookAI/roberta-base --train-batch-size 8 
---eval-batch-size 8 --learning-rate 5e-5 --weight-decay 0.0 --num-train-epochs 3 --gradient-accumulation-steps 1
+RUST_LOG=info  cargo run --release --example train_sequence_classification --  --dataset-name imdb --hf-train-file plain_text/train-00000-of-00001.parquet --hf-test-file plain_text/test-00000-of-00001.parquet --max-length 128 --pad-to-max-length --model-name wrmurray/roberta-base-finetuned-imdb  --train-batch-size 8  --eval-batch-size 8 --learning-rate 5e-5 --weight-decay 0.0 --num-train-epochs 3 --gradient-accumulation-steps 1
 
  */
 
@@ -87,14 +88,14 @@ struct Args{
 
 
 }
-pub fn main(){
+pub fn main() -> Result<()>{
 
     // Initialize logger
     env_logger::init();
 
     let args = Args::parse();
-    let seed: ThreadRng = rand::thread_rng();
-    let device = Device::cuda_if_available(0).unwrap();
+    let mut seed: ThreadRng = rand::thread_rng();
+    let device = Device::cuda_if_available(0)?;
 
     // Set up logging
     info!("Logging training parameters");
@@ -117,10 +118,10 @@ pub fn main(){
         "parquet");
 
     let training_file_paths = dataset.download();
-    let training_file_paths = training_file_paths.unwrap();
+    let training_file_paths = training_file_paths?;
 
-    let train_datatable = dataset.load_parquet(&training_file_paths[0], args.train_batch_size).unwrap();
-    let test_datatable = dataset.load_parquet(&training_file_paths[1], args.eval_batch_size).unwrap();
+    let train_datatable = dataset.load_parquet(&training_file_paths[0], args.train_batch_size)?;
+    let test_datatable = dataset.load_parquet(&training_file_paths[1], args.eval_batch_size)?;
 
     let mut train_strings: Vec<String> = Vec::new();
     let mut train_labels: Vec<i64> = Vec::new();
@@ -154,26 +155,37 @@ pub fn main(){
     info!("Number of test examples: {}", test_strings.len());
     info!("Sample Training example: {:?} and Label: {:?}", train_strings[0], train_labels[0]);
 
-    
-    let (config_file, tokenizer, weights_filename) = get_config_tokenizer_path(&args.model_name, false).unwrap();
-    let mut config: RobertaConfig = serde_json::from_str(&config_file).unwrap();
-    config._num_labels = Some(1);
+    let mut indices = (0..train_strings.len()).collect::<Vec<usize>>();
+    indices.shuffle(&mut seed); // Use the shuffle method from the SliceRandom trait
+
+    let train_strings: Vec<String> = indices.iter().map(|i| train_strings[*i].clone()).collect();
+    let train_labels: Vec<i64> = indices.iter().map(|i| train_labels[*i]).collect();
+
+    let mut test_indices = (0..test_strings.len()).collect::<Vec<usize>>();
+    test_indices.shuffle(&mut seed); // Use the shuffle method from the SliceRandom trait
+
+    let test_strings: Vec<String> = test_indices.iter().map(|i| test_strings[*i].clone()).collect();
+    let test_labels: Vec<i64> = test_indices.iter().map(|i| test_labels[*i]).collect();
+
+    let (config_file, tokenizer, weights_filename) = get_config_tokenizer_path(&args.model_name, false)?;
+    let mut config: RobertaConfig = serde_json::from_str(&config_file)?;
+    config._num_labels = Some(2);
     config.problem_type = Some("single_label_classification".to_string());
 
     let mut varmap = VarMap::new();
-    // let mut vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+    let mut vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
 
-    let vs = unsafe { VarBuilder::from_mmaped_safetensors(&[weights_filename.clone()], FLOATING_DTYPE, &device).unwrap() };
-    varmap.load(weights_filename).unwrap();
+    // let vs = unsafe { VarBuilder::from_mmaped_safetensors(&[weights_filename.clone()], FLOATING_DTYPE, &device)? };
+    varmap.load(weights_filename)?;
     
-    let model = RobertaForSequenceClassification::load(vs, &config).unwrap();
+    let model = RobertaForSequenceClassification::load(vs.clone(), &config)?;
     let paramsw = ParamsAdamW::default();
-    let mut adamw = AdamW::new(varmap.all_vars(), paramsw).unwrap();
+    let mut adamw = AdamW::new(varmap.all_vars(), paramsw)?;
 
     for epoch in 1..EPOCHS + 1 {
         info!("Epoch: {}", epoch);
 
-        for (_i, (input, label)) in train_strings.chunks(8).zip(train_labels.chunks(8)).enumerate(){
+        for (_i, (input, label)) in tqdm!(train_strings.chunks(8).zip(train_labels.chunks(8)).enumerate()){
 
             let pad_token_id = 0;
             let max_len = 128;
@@ -186,26 +198,68 @@ pub fn main(){
                 tokens.resize(max_len, pad_token_id);
                 Ok(Tensor::new(tokens.as_slice(), &device)?)
             })
-            .collect::<Result<Vec<_>>>().unwrap();
+            .collect::<Result<Vec<_>>>()?;
 
-            let token_ids = Tensor::stack(&token_ids, 0).unwrap();
-            let token_type_ids = token_ids.zeros_like().unwrap();
-            let labels = Tensor::new(label, &device).unwrap();
+            let token_ids = Tensor::stack(&token_ids, 0)?;
+            let token_type_ids = token_ids.zeros_like()?;
+            let labels = Tensor::new(label, &device)?;
 
-            let outputs = model.forward(&token_ids, &token_type_ids, Some(&labels)).unwrap();
+            let outputs = model.forward(&token_ids, &token_type_ids, Some(&labels))?;
             let loss = outputs.loss.unwrap();
-            let logits = outputs.logits;
 
-            info!("Logits: {:?}", logits.to_device(&Device::Cpu).unwrap().to_vec2::<f32>());
-            info!("Loss: {:?}", loss.to_device(&Device::Cpu).unwrap().to_vec1::<f64>());
+            adamw.backward_step(&loss)?;
 
-            adamw.backward_step(&loss).unwrap();
+            if _i % 100 == 0 {
+                info!("Loss: {:?}", loss.to_device(&Device::Cpu)?.to_vec0::<f32>());
+            };
 
-            break;
+            //compute test accuracy
+            if _i % 500 == 0 {
+                let mut correct = 0;
+                let mut total = 0;
+                for (_j, (test_input, test_label)) in test_strings.chunks(8).zip(test_labels.chunks(8)).enumerate(){
+                    let tokens = tokenizer.encode_batch(test_input.to_vec(), true).unwrap();
+                    let token_ids = tokens
+                        .iter()
+                        .map(|tokens| {
+                            let mut tokens = tokens.get_ids().to_vec();
+                            tokens.resize(max_len, pad_token_id);
+                            Ok(Tensor::new(tokens.as_slice(), &device)?)
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    let token_ids = Tensor::stack(&token_ids, 0)?;
+                    let token_type_ids = token_ids.zeros_like()?;
+
+                    let outputs = model.forward(&token_ids, &token_type_ids, Some(&labels))?;
+                    let logits = outputs.logits.to_device(&Device::Cpu)?.to_vec2::<f32>().unwrap();
+                    let labels = test_label.to_vec();
+
+                    info!("Test Labels: {:?}", labels);
+                    info!("Logits: {:?}", logits);
+
+                    //for vec in logits get the maximum index
+                    let mut k=0;
+                    for vec in logits{
+                        let max_index = vec.iter().enumerate().max_by(|(_, u), (_, v)| u.total_cmp(v))
+                        .map(|(i, _)| i as i64)
+                        .unwrap();
+
+                        if max_index == labels[k]{
+                            correct += 1;
+                        }
+                        total += 1;
+                        k+=1;
+                    }
+                        
+                    break;
+                }
+                info!("Test Accuracy: {}", correct as f32 / total as f32);
+            }
         
         }
 
-        break;
-
         }
+
+        Ok(())
     }

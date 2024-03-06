@@ -8,8 +8,12 @@ use crate::models::model_utils::{HiddenAct, HiddenActLayer, PositionEmbeddingTyp
 use crate::models::model_utils::binary_cross_entropy_with_logit;
 use serde::Deserialize;
 
+use log::info;
+use env_logger;
+
 pub const FLOATING_DTYPE: DType = DType::F32;
 pub const LONG_DTYPE: DType = DType::I64;
+
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RobertaConfig {
@@ -586,7 +590,7 @@ impl RobertaClassificationHead {
 
     fn load(vb: VarBuilder, config: &RobertaConfig) -> Result<Self> {
         // let dense = linear(config.hidden_size, config.hidden_size, vb.pp("dense"))?;
-        let dense = linear(config.hidden_size, config.hidden_size, vb)?;
+        let dense = linear(config.hidden_size, config.hidden_size, vb.pp("dense"))?;
         let classifier_dropout = config.classifier_dropout;
 
         let classifier_dropout: f32 = match classifier_dropout {
@@ -595,9 +599,7 @@ impl RobertaClassificationHead {
         };
         // let out_proj = linear(config.hidden_size, config._num_labels.unwrap(), vb.pp("out_proj"))?;
 
-        let out_proj = linear(config.hidden_size, config._num_labels.unwrap(), vb)?;
-
-        
+        let out_proj = linear(config.hidden_size, config._num_labels.unwrap(), vb.pp("out_proj"))?;
 
         Ok( Self {
             dense,
@@ -630,6 +632,9 @@ pub struct RobertaForSequenceClassification {
 impl  RobertaForSequenceClassification {
     pub fn load(vb: VarBuilder, config: &RobertaConfig) -> Result<Self> {
         let (roberta, classifier) = match (
+            // RobertaModel::load(vb.pp("roberta"), config),
+            // RobertaClassificationHead::load(vb.pp("classifier"), config),
+
             RobertaModel::load(vb.pp("roberta"), config),
             RobertaClassificationHead::load(vb.pp("classifier"), config),
         ) {
@@ -647,6 +652,7 @@ impl  RobertaForSequenceClassification {
     }
 
     pub fn forward(&self, input_ids: &Tensor, token_type_ids: &Tensor, labels: Option<&Tensor>) -> Result<SequenceClassifierOutput> {
+       
         let outputs = self
             .roberta
             .forward(input_ids, token_type_ids)?;
@@ -667,10 +673,11 @@ impl  RobertaForSequenceClassification {
                     } else {
                         problem_type = String::from("multi_label_classification");
                     }
-                }
+                } else {
+                    problem_type = self.config.problem_type.clone().unwrap();}
 
                 if problem_type == String::from("single_label_classification") {
-                    loss = candle_nn::loss::cross_entropy(&logits.flatten_to(1)?, &labels.flatten_to(1)?)?;
+                    loss = candle_nn::loss::cross_entropy(&logits, &labels)?;
                 } else if problem_type == String::from("multi_label_classification") {
                     let labels_logits: Tensor =  logits.zeros_like()?;
                     let mut label_logits = labels_logits.to_vec2::<f32>()?;
