@@ -3,30 +3,24 @@ use clap::Parser;
 use log::info;
 use env_logger;
 use rand::rngs::ThreadRng;
-use rand::Rng;
 use kdam::tqdm;
 use anyhow::Result;
 
-use candle_core::{DType, Device, IndexOp, Shape, Tensor, D};
-use candle_nn::{
-    embedding, layer_norm, linear, linear_no_bias, loss, sequential, Activation, AdamW, Embedding,
-    LayerNorm, LayerNormConfig, Linear, Optimizer, ParamsAdamW, Sequential, VarBuilder, VarMap,
+use candle_core::{DType, Device, Tensor};
+use candle_nn::{ AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap,
 };
-use candle_nn::{ops, Module};
 
 use candle_training::datasets::load_dataset::Dataset;
-use candle_training::models::load_model::{get_config_tokenizer_path, ModelType};
+use candle_training::models::load_model::get_config_tokenizer_path;
 use candle_training::models::roberta::{RobertaForSequenceClassification, RobertaConfig};
 use rand::seq::SliceRandom; // Import the SliceRandom trait
 
 /*
 RUST_LOG=info  cargo run --release --example train_sequence_classification --  --dataset-name imdb --hf-train-file plain_text/train-00000-of-00001.parquet --hf-test-file plain_text/test-00000-of-00001.parquet --max-length 128 --pad-to-max-length --model-name wrmurray/roberta-base-finetuned-imdb  --train-batch-size 8  --eval-batch-size 8 --learning-rate 5e-5 --weight-decay 0.0 --num-train-epochs 3 --gradient-accumulation-steps 1
-
  */
 
 pub const FLOATING_DTYPE: DType = DType::F32;
 pub const LONG_DTYPE: DType = DType::I64;
-const LEARNING_RATE: f64 = 0.05;
 const EPOCHS: usize = 10;
 
 #[derive(Parser, Debug)]
@@ -57,16 +51,16 @@ struct Args{
     model_name: String,
 
     /// Training batch size
-    #[arg(short, long, default_value_t = 8)]
+    #[arg(short, long)]
     train_batch_size: usize,
 
     /// Evaluation batch size
-    #[arg(short, long, default_value_t = 8)]
+    #[arg(short, long)]
     eval_batch_size: usize,
 
     /// learning rate
     #[arg(short, long, default_value_t = 5e-5)]
-    learning_rate: f32,
+    learning_rate: f64,
 
     /// Weight decay
     #[arg(short, long, default_value_t = 0.0)]
@@ -164,6 +158,9 @@ pub fn main() -> Result<()>{
     let mut test_indices = (0..test_strings.len()).collect::<Vec<usize>>();
     test_indices.shuffle(&mut seed); // Use the shuffle method from the SliceRandom trait
 
+    // select a subset of the test data about 1000 examples
+    test_indices = test_indices.iter().take(1000).map(|i| *i).collect();
+
     let test_strings: Vec<String> = test_indices.iter().map(|i| test_strings[*i].clone()).collect();
     let test_labels: Vec<i64> = test_indices.iter().map(|i| test_labels[*i]).collect();
 
@@ -173,21 +170,22 @@ pub fn main() -> Result<()>{
     config.problem_type = Some("single_label_classification".to_string());
 
     let mut varmap = VarMap::new();
-    let mut vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+    // let mut vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
 
-    // let vs = unsafe { VarBuilder::from_mmaped_safetensors(&[weights_filename.clone()], FLOATING_DTYPE, &device)? };
+    let vs = unsafe { VarBuilder::from_mmaped_safetensors(&[weights_filename.clone()], FLOATING_DTYPE, &device)? };
     varmap.load(weights_filename)?;
     
-    let model = RobertaForSequenceClassification::load(vs.clone(), &config)?;
-    let paramsw = ParamsAdamW::default();
+    let model = RobertaForSequenceClassification::load(vs, &config)?;
+    let mut paramsw = ParamsAdamW::default();
+    paramsw.lr = args.learning_rate;
     let mut adamw = AdamW::new(varmap.all_vars(), paramsw)?;
 
     for epoch in 1..EPOCHS + 1 {
         info!("Epoch: {}", epoch);
 
-        for (_i, (input, label)) in tqdm!(train_strings.chunks(8).zip(train_labels.chunks(8)).enumerate()){
+        for (_i, (input, label)) in tqdm!(train_strings.chunks(args.train_batch_size).zip(train_labels.chunks(args.train_batch_size)).enumerate()){
 
-            let pad_token_id = 0;
+            let pad_token_id = config.pad_token_id as u32;
             let max_len = 128;
 
             let tokens = tokenizer.encode_batch(input.to_vec(), true).unwrap();
@@ -210,14 +208,14 @@ pub fn main() -> Result<()>{
             adamw.backward_step(&loss)?;
 
             if _i % 100 == 0 {
-                info!("Loss: {:?}", loss.to_device(&Device::Cpu)?.to_vec0::<f32>());
+                info!("Loss: {:?}", loss.to_device(&Device::Cpu)?.to_scalar::<f32>()?);
             };
 
             //compute test accuracy
             if _i % 500 == 0 {
                 let mut correct = 0;
                 let mut total = 0;
-                for (_j, (test_input, test_label)) in test_strings.chunks(8).zip(test_labels.chunks(8)).enumerate(){
+                for (_j, (test_input, test_label)) in test_strings.chunks(args.eval_batch_size).zip(test_labels.chunks(args.eval_batch_size)).enumerate(){
                     let tokens = tokenizer.encode_batch(test_input.to_vec(), true).unwrap();
                     let token_ids = tokens
                         .iter()
@@ -230,13 +228,11 @@ pub fn main() -> Result<()>{
 
                     let token_ids = Tensor::stack(&token_ids, 0)?;
                     let token_type_ids = token_ids.zeros_like()?;
+                    let test_label = Tensor::new(test_label, &device)?;
 
-                    let outputs = model.forward(&token_ids, &token_type_ids, Some(&labels))?;
+                    let outputs = model.forward(&token_ids, &token_type_ids, Some(&test_label))?;
                     let logits = outputs.logits.to_device(&Device::Cpu)?.to_vec2::<f32>().unwrap();
-                    let labels = test_label.to_vec();
-
-                    info!("Test Labels: {:?}", labels);
-                    info!("Logits: {:?}", logits);
+                    let labels = test_label.to_vec1::<i64>().unwrap();
 
                     //for vec in logits get the maximum index
                     let mut k=0;
@@ -251,8 +247,6 @@ pub fn main() -> Result<()>{
                         total += 1;
                         k+=1;
                     }
-                        
-                    break;
                 }
                 info!("Test Accuracy: {}", correct as f32 / total as f32);
             }

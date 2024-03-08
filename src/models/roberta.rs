@@ -8,9 +8,6 @@ use crate::models::model_utils::{HiddenAct, HiddenActLayer, PositionEmbeddingTyp
 use crate::models::model_utils::binary_cross_entropy_with_logit;
 use serde::Deserialize;
 
-use log::info;
-use env_logger;
-
 pub const FLOATING_DTYPE: DType = DType::F32;
 pub const LONG_DTYPE: DType = DType::I64;
 
@@ -28,7 +25,7 @@ pub struct RobertaConfig {
     type_vocab_size: usize,
     initializer_range: f64,
     layer_norm_eps: f64,
-    pad_token_id: usize,
+    pub pad_token_id: usize,
     bos_token_id: usize,
     eos_token_id: usize,
     #[serde(default)]
@@ -656,7 +653,7 @@ impl  RobertaForSequenceClassification {
         let outputs = self
             .roberta
             .forward(input_ids, token_type_ids)?;
-        let mut problem_type: String = String::from("");
+        let problem_type: String;
 
         let logits = self.classifier.forward(&outputs)?;
         let mut loss: Tensor = Tensor::new(vec![0.0], &self.device)?;
